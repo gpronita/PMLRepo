@@ -1,0 +1,163 @@
+---
+title: "Practical Machine Learning"
+output:
+  html_document:
+    highlight: haddock
+    keep_md: yes
+    theme: united
+---
+
+## Introduction
+This report analyzes a data set containing information from personal activity monitors such as *Jawbone Up*,
+*Nike FuelBand* and *FitBit*.  These data sets contain measurements that quantify physical movement obtained
+from accelerometers on the belt, forearm, arm and dumbbell of an individual.  We will analyze such a data set 
+to construct a model that predicts the manner in which 6 individuals perform one set of 10 repetitions of the 
+Unilateral Dumbbell Biceps Curl.  The manner in which an individual conducts this exercise is classified into 
+5 types:  
+
+* A = exactly according to the specification
+* B = throwing the elbows to the front
+* C = lifting the dumbbell only halfway
+* D = lowering the dumbbell only halfway
+* E = throwing the hips to the front 
+
+For more information, visit http://groupware.les.inf.puc-rio.br/har .
+
+To facilitate the analysis, we will need the following R packages:
+```{r, message = FALSE}
+library(caret)
+library(e1071)
+library(randomForest)
+```
+
+## Data Sets
+The data for this analysis is comprised of two sets, a training set and a testing set.  The former consists
+of 19,622 records of 159 variables including the variable to be predicted, namely **classe**.  The latter 
+consists of 20 records of 160 variables.  They are available as CSV files from the following links:
+
+* Training set:  http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+* Testing set:   http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+We read in the data with the following commands:
+```{r}
+raw_train <- read.table("pml-training.csv", sep=",", header=TRUE, stringsAsFactors=FALSE, na.strings=c('NA', '', '#DIV/0!'))
+test      <- read.table("pml-testing.csv",  sep=",", header=TRUE, stringsAsFactors=FALSE, na.strings=c('NA', '', '#DIV/0!'))
+```
+As mentioned above, the variable we are trying to predict is **classe**.  It contains the values "A", "B",
+"C", "D" and "E", corresponding to the way in which an individual conducts an exercise (see Introduction).
+The following histogram illustrates the frequency of each value of the variable **classe** in the training set:
+```{r, fig.height=3.5, fig.width=5}
+qplot(classe, data = raw_train, geom = "histogram", main="Frequency of Values in Variable classe")
+```
+
+## Data (Pre)processing
+A look at the test data set reveals that there are a number of potential predictor variables that contain
+NA and/or have no value for many or all records.  Additionally, the first seven variables in this set are 
+irrelevant to the prediction of the dependent variable **classe**.  Hence, we remove these variables from 
+the training set.  The resulting data set has 19,622 records on 53 variables, each of which has a numeric 
+value for all records:
+```{r}
+varsNA <- apply(apply(test, 2, is.na), 2, any)
+firstSeven <- c("X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "new_window", "num_window")
+badVarNames <- unique(c(firstSeven, colnames(test)[varsNA], "problem_id"))
+train <- raw_train[, !(names(raw_train) %in% badVarNames)]
+train$classe <- as.factor(train$classe)
+dim(train)
+any(apply(apply(train, 2, is.na), 2, any))
+```
+Before we apply any more data preprocessing, we will specify how we will be training and
+testing candidate models.  We will split the **train** data set itself into a training
+and testing set with a 70% / 30% split.  Hence, any further data preprocessing will be
+done on the training portion of the **train** data set:
+```{r}
+set.seed(123456789)
+trainIndex <- createDataPartition(y=train$classe, p = 0.7, list = FALSE)
+train_train <- train[trainIndex, ]
+train_test <- train[-trainIndex, ]
+dim(train_train)
+dim(train_test)
+```
+### Zero Variance Predictors
+We check to see if any of the variables in **train_train** are near zero variance predictors:
+```{r}
+vars_NZV <- nearZeroVar(train_train, saveMetrics = TRUE)
+any(vars_NZV$nzv)
+```
+The above result indicates that none of the 53 variables in the training set qualifies as a near zero 
+variance predictor.
+
+### Highly Correlated Predictors
+We next check for variables that are highly correlated, as this can cause problems for some types of
+predictive models.  We impose a threshold of 90% correlation.  The following code reveals that there 
+are 5 variables that are highly correlated.  After removing them from the data set, the maximum 
+correlation between the variables (in absolute value) is about 88%:
+```{r}
+highCorrVars <- findCorrelation(cor(subset(train_train, select=-c(classe))), cutoff = 0.90)
+colnames(train_train)[highCorrVars]
+train_train <- train_train[, -highCorrVars]
+corrMat <- cor(subset(train_train, select=-c(classe)))
+summary(corrMat[upper.tri(corrMat)])
+dim(train_train)
+```
+Hence, our final training set consists of 13,737 records on 47 predictor variables plus the dependent
+variable **classe** (48 variables in total).
+
+## Predictive Model -- Random Forest
+We choose a random forest as our predictive model.  We do so for a number of reasons.  First, the
+outcome variable is discrete and hence our problem is one of classification; random forests
+generally do a much better job of modeling such problems than say decision trees, albeit at the
+expense of interpretability.  Additionally, random forests can handle possibly nonlinear 
+relationships between the outcome variable and the predictors.
+
+The model will be trained on the **train_train** data set using 10-fold cross-validation.  To get 
+an estimate of the out-of-sample accuracy, the model will be tested on the **train_test** data set.
+```{r}
+set.seed(987654321)
+modFit <- train(classe ~ ., method="rf", trControl=trainControl(method="cv", number=10), data=train_train, allowParallel=TRUE)
+print(modFit, digits=4)
+modFit$finalModel
+```
+The above output indicates a number of things.  First, the final model considers 24 out of the
+original 47 predictor variables at each split.  For this choice, the model accuracy over the
+cross-validation set is 99.26% with an out-of-bag error rate of 0.69%.  In general, it
+seems that the model has the most difficulty correctly identifying movement C, i.e. "lifting
+the dumbell only halfway".
+
+As a matter of interest, we can look at the top 20 most important variables in the trained model:
+```{r}
+plot(varImp(modFit, scale = FALSE), top = 20)
+```
+
+We can now apply this trained model to the testing portion of the original training data, namely
+the data set **train_test** to get an idea for the out-of-sample accuracy:
+```{r}
+predict_test <- predict(modFit, newdata = train_test)
+confusionMatrix(train_test$classe, predict_test)
+```
+The out-of-sample accuracy of the model is approximately 99.47% with a concordance (Kappa) of 99.33%.
+This accuracy is quite close to the accuracy estimate produced in the cross-validation results.
+From that table, we saw that a model with 24 predictors used at each split had an accuracy of 99.26%
+which is within the 95% confidence interval of the out-of-sample estimate.  Here again, the 
+confusion matrix indicates that the model has the most difficulty predicting the act of
+"C = lifting the dumbell only halfway".
+
+### Prediction Results For Test Set
+Finally, we can apply the trained model to the original testing set to get predictions for the
+20 cases of interest.  
+```{r}
+predictions <- predict(modFit, newdata = test)
+print(predictions)
+```
+
+### Write Results To File
+```{r}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(predictions)
+```
+
